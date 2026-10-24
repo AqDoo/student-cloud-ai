@@ -6,4 +6,4 @@ plotly==6.4.0
 fastapi==0.120.0
 uvicorn==0.38.0
 joblib==1.5.2
-
+google-cloud-bigquery>=3.25,<4
