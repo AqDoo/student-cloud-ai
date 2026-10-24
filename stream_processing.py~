@@ -1,0 +1,106 @@
+from pathlib import Path
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, current_timestamp, when
+from pyspark.sql.types import (
+    DoubleType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
+)
+
+BASE_DIR = Path(__file__).parent.resolve()
+INPUT_DIR = BASE_DIR / "stream" / "input"
+OUTPUT_DIR = BASE_DIR / "stream" / "output"
+CHECKPOINT_DIR = BASE_DIR / "stream" / "checkpoint"
+
+for directory in (INPUT_DIR, OUTPUT_DIR, CHECKPOINT_DIR):
+    directory.mkdir(parents=True, exist_ok=True)
+
+schema = StructType(
+    [
+        StructField("student_id", StringType(), False),
+        StructField("attendance", DoubleType(), False),
+        StructField("practice_score", DoubleType(), False),
+        StructField("activity", DoubleType(), False),
+        StructField("missed_tasks", IntegerType(), False),
+    ]
+)
+
+spark = (
+    SparkSession.builder
+    .master("local[*]")
+    .appName("StudentStreamingAnalytics")
+    .getOrCreate()
+)
+
+spark.sparkContext.setLogLevel("ERROR")
+
+stream_data = (
+    spark.readStream
+    .schema(schema)
+    .option("header", True)
+    .option("maxFilesPerTrigger", 1)
+    .csv(INPUT_DIR.as_posix())
+)
+
+predictions = (
+    stream_data
+    .withColumn(
+        "risk_score",
+        (
+            (100 - col("attendance")) * 0.35
+            + (100 - col("practice_score")) * 0.35
+            + (100 - col("activity")) * 0.15
+            + col("missed_tasks") * 3
+        ).cast("double")
+    )
+    .withColumn(
+        "predicted_risk",
+        when(col("risk_score") >= 40, "Жоғары")
+        .when(col("risk_score") >= 22, "Орташа")
+        .otherwise("Төмен")
+    )
+    .withColumn("processed_at", current_timestamp())
+)
+
+
+def process_batch(batch_df, batch_id):
+    print(f"\n========== MICRO-BATCH №{batch_id} ==========")
+
+    if batch_df.isEmpty():
+        print("Жаңа мәліметтер жоқ")
+        return
+
+    batch_df.show(truncate=False)
+
+    (
+        batch_df.coalesce(1)
+        .write
+        .mode("append")
+        .option("header", True)
+        .csv(OUTPUT_DIR.as_posix())
+    )
+
+    print(f"Нәтиже сақталды: {OUTPUT_DIR}")
+
+
+query = (
+    predictions.writeStream
+    .foreachBatch(process_batch)
+    .option("checkpointLocation", CHECKPOINT_DIR.as_posix())
+    .trigger(processingTime="5 seconds")
+    .start()
+)
+
+print("Потоковая обработка запущена")
+print(f"Ожидание новых CSV-файлов: {INPUT_DIR}")
+print("Для остановки нажмите Ctrl+C")
+
+try:
+    query.awaitTermination()
+except KeyboardInterrupt:
+    print("\nПотоковая обработка остановлена")
+    query.stop()
+    spark.stop()

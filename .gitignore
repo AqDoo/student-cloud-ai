@@ -1,0 +1,25 @@
+# Виртуальные окружения
+venv312/
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# PyCharm
+.idea/
+
+# Секретные данные
+.streamlit/secrets.toml
+.env
+
+# Результаты Spark
+stream/checkpoint/
+stream/output/
+
+# Системные файлы
+.DS_Store
+Thumbs.db

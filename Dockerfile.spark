@@ -1,0 +1,9 @@
+FROM apache/spark:4.2.0
+
+USER root
+
+WORKDIR /app
+
+COPY stream_processing.py /app/stream_processing.py
+
+CMD ["/opt/spark/bin/spark-submit", "--master", "local[*]", "/app/stream_processing.py"]
