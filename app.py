@@ -3,9 +3,75 @@ from pathlib import Path
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import io
+import json
 
 from generate_data import generate_students
 from model import FEATURES, predict, train_model
+from google.cloud import bigquery
+from google.oauth2 import service_account
+
+def save_to_bigquery(dataframe: pd.DataFrame) -> int:
+    """Пакетная загрузка результатов в Google BigQuery."""
+
+    service_account_info = json.loads(
+        st.secrets["gcp_service_account_json"]
+    )
+
+    credentials = (
+        service_account.Credentials.from_service_account_info(
+            service_account_info
+        )
+    )
+
+    project_id = st.secrets["bigquery"]["project_id"]
+    dataset_id = st.secrets["bigquery"]["dataset_id"]
+    table_id = st.secrets["bigquery"]["table_id"]
+
+    client = bigquery.Client(
+        project=project_id,
+        credentials=credentials,
+    )
+
+    table_address = (
+        f"{project_id}.{dataset_id}.{table_id}"
+    )
+
+    cloud_columns = [
+        "student_id",
+        "attendance",
+        "practice_score",
+        "activity",
+        "missed_tasks",
+        "final_score",
+        "risk_level",
+    ]
+
+    cloud_data = dataframe[cloud_columns].copy()
+
+    csv_bytes = cloud_data.to_csv(
+        index=False
+    ).encode("utf-8")
+
+    csv_file = io.BytesIO(csv_bytes)
+
+    job_config = bigquery.LoadJobConfig(
+        source_format=bigquery.SourceFormat.CSV,
+        skip_leading_rows=1,
+        autodetect=True,
+        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+    )
+
+    load_job = client.load_table_from_file(
+        csv_file,
+        table_address,
+        job_config=job_config,
+    )
+
+    load_job.result()
+
+    table = client.get_table(table_address)
+    return table.num_rows
 
 st.set_page_config(page_title="Cloud Student Analytics", page_icon="☁️", layout="wide")
 
@@ -86,4 +152,35 @@ with tab3:
     st.write("Жүйе барлық студент бойынша болжамды CSV есебі ретінде қалыптастырады.")
     report_csv = predicted.to_csv(index=False).encode("utf-8-sig")
     st.download_button("CSV есебін жүктеу", report_csv, "student_risk_report.csv", "text/csv")
+    st.divider()
+    st.subheader("☁️ BigQuery бұлттық қоймасы")
+    st.write(
+        "Талдау нәтижелерін Google BigQuery бұлттық "
+        "деректер қорына пакетпен сақтауға болады."
+    )
+
+    if st.button(
+        "Нәтижелерді BigQuery-ге сақтау",
+        type="primary",
+    ):
+        try:
+            with st.spinner(
+                "Деректер BigQuery-ге жіберілуде..."
+            ):
+                saved_rows = save_to_bigquery(data)
+
+            st.success(
+                f"{saved_rows} жазба BigQuery-ге сәтті сақталды."
+            )
+
+        except KeyError:
+            st.error(
+                "BigQuery Secrets параметрлері табылмады."
+            )
+
+        except Exception as error:
+            st.error(
+                "BigQuery-ге сақтау кезінде қате пайда болды."
+            )
+            st.exception(error)
 

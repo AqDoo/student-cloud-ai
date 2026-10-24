@@ -1,0 +1,156 @@
+from pathlib import Path
+
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+import io
+import json
+
+from generate_data import generate_students
+from model import FEATURES, predict, train_model
+from google.cloud import bigquery
+from google.oauth2 import service_account
+
+def save_to_bigquery(dataframe: pd.DataFrame) -> int:
+    """Пакетная загрузка результатов в Google BigQuery."""
+
+    service_account_info = json.loads(
+        st.secrets["gcp_service_account_json"]
+    )
+
+    credentials = (
+        service_account.Credentials.from_service_account_info(
+            service_account_info
+        )
+    )
+
+    project_id = st.secrets["bigquery"]["project_id"]
+    dataset_id = st.secrets["bigquery"]["dataset_id"]
+    table_id = st.secrets["bigquery"]["table_id"]
+
+    client = bigquery.Client(
+        project=project_id,
+        credentials=credentials,
+    )
+
+    table_address = (
+        f"{project_id}.{dataset_id}.{table_id}"
+    )
+
+    cloud_columns = [
+        "student_id",
+        "attendance",
+        "practice_score",
+        "activity",
+        "missed_tasks",
+        "final_score",
+        "risk_level",
+    ]
+
+    cloud_data = dataframe[cloud_columns].copy()
+
+    csv_bytes = cloud_data.to_csv(
+        index=False
+    ).encode("utf-8")
+
+    csv_file = io.BytesIO(csv_bytes)
+
+    job_config = bigquery.LoadJobConfig(
+        source_format=bigquery.SourceFormat.CSV,
+        skip_leading_rows=1,
+        autodetect=True,
+        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+    )
+
+    load_job = client.load_table_from_file(
+        csv_file,
+        table_address,
+        job_config=job_config,
+    )
+
+    load_job.result()
+
+    table = client.get_table(table_address)
+    return table.num_rows
+
+st.set_page_config(page_title="Cloud Student Analytics", page_icon="☁️", layout="wide")
+
+st.markdown(
+    """
+    <style>
+      .stApp {background: linear-gradient(135deg, #f4f8ff 0%, #eefaf7 100%);}
+      [data-testid="stMetric"] {background:white; border:1px solid #dce7f4; padding:16px; border-radius:16px;}
+      h1, h2, h3 {color:#153b5b;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.title("☁️ Студенттердің үлгерімін бұлттық талдау")
+st.caption("Python және машиналық оқыту көмегімен тәуекел деңгейін анықтау")
+
+with st.sidebar:
+    st.header("Деректер көзі")
+    uploaded = st.file_uploader("CSV файлын жүктеңіз", type=["csv"])
+    st.info("Файл болмаса, жүйе демонстрациялық деректерді қолданады.")
+
+if uploaded:
+    data = pd.read_csv(uploaded)
+    source = "Жүктелген CSV"
+else:
+    sample_path = Path(__file__).parent / "data" / "students.csv"
+    data = pd.read_csv(sample_path) if sample_path.exists() else generate_students()
+    source = "Демонстрациялық деректер"
+
+try:
+    result = train_model(data)
+    predicted = predict(result.pipeline, data)
+except ValueError as exc:
+    st.error(str(exc))
+    st.stop()
+
+high_risk = int((predicted["predicted_risk"] == "Жоғары").sum())
+average_score = float(predicted["final_score"].mean()) if "final_score" in predicted else 0
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Студенттер саны", len(predicted))
+c2.metric("Орташа нәтиже", f"{average_score:.1f}")
+c3.metric("Жоғары тәуекел", high_risk)
+c4.metric("Модель дәлдігі", f"{result.accuracy:.1%}")
+st.caption(f"Деректер көзі: {source}")
+
+tab1, tab2, tab3 = st.tabs(["📊 Аналитика", "🤖 ИИ болжамы", "📄 Есеп"])
+
+with tab1:
+    left, right = st.columns(2)
+    with left:
+        risk_counts = predicted["predicted_risk"].value_counts().rename_axis("Тәуекел").reset_index(name="Саны")
+        st.plotly_chart(px.pie(risk_counts, names="Тәуекел", values="Саны", hole=0.5,
+                               color="Тәуекел", color_discrete_map={"Жоғары":"#ef476f", "Орташа":"#ffd166", "Төмен":"#06d6a0"}),
+                        width="stretch")
+    with right:
+        st.plotly_chart(px.scatter(predicted, x="attendance", y="practice_score", color="predicted_risk",
+                                   hover_data=["student_id"], title="Қатысу мен практикалық нәтиже байланысы"),
+                        width="stretch")
+
+with tab2:
+    st.subheader("Жеке студент бойынша болжам")
+    cols = st.columns(4)
+    values = {
+        "attendance": cols[0].slider("Қатысу, %", 0, 100, 80),
+        "practice_score": cols[1].slider("Практика бағасы", 0, 100, 75),
+        "activity": cols[2].slider("Белсенділік", 0, 100, 70),
+        "missed_tasks": cols[3].slider("Орындалмаған тапсырма", 0, 15, 2),
+    }
+    one = pd.DataFrame([values], columns=FEATURES)
+    one_result = predict(result.pipeline, one).iloc[0]
+    st.success(f"Болжам: **{one_result['predicted_risk']} тәуекел** · сенімділік: {one_result['confidence']:.1%}")
+    st.dataframe(predicted[["student_id", *FEATURES, "predicted_risk", "confidence"]], width="stretch")
+
+with tab3:
+    st.subheader("Есепті жүктеу")
+    st.write("Жүйе барлық студент бойынша болжамды CSV есебі ретінде қалыптастырады.")
+    report_csv = predicted.to_csv(index=False).encode("utf-8-sig")
+    st.download_button("CSV есебін жүктеу", report_csv, "student_risk_report.csv", "text/csv")
+    
+
